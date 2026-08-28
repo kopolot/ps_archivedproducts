@@ -26,7 +26,7 @@ class Ps_Archivedproducts extends Module
     {
         $this->name = 'ps_archivedproducts';
         $this->tab = 'seo';
-        $this->version = '1.0.0';
+        $this->version = '1.0.1';
         $this->author = 'kopolot';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -487,10 +487,18 @@ class Ps_Archivedproducts extends Module
 
     private function getDefaultMessageForIso(string $isoCode): string
     {
-        if ($isoCode === 'pl') {
-            return 'Ten produkt został wycofany ze sprzedaży. Strona pozostaje dostępna w celach informacyjnych i SEO.';
-        }
+        $isoCode = strtolower(substr($isoCode, 0, 2));
 
-        return 'This product has been withdrawn from sale. The page is kept online for reference and SEO purposes.';
+        $messages = [
+            'pl' => 'Ten produkt został wycofany ze sprzedaży. Strona pozostaje dostępna w celach informacyjnych i SEO.',
+            'fr' => 'Ce produit a été retiré de la vente. La page reste accessible à des fins d\'information et de référencement.',
+            'de' => 'Dieses Produkt wurde aus dem Verkauf genommen. Die Seite bleibt zu Informations- und SEO-Zwecken verfügbar.',
+            'es' => 'Este producto ha sido retirado de la venta. La página permanece disponible con fines informativos y SEO.',
+            'it' => 'Questo prodotto è stato ritirato dalla vendita. La pagina rimane disponibile per scopi informativi e SEO.',
+            'pt' => 'Este produto foi retirado da venda. A página permanece disponível para fins informativos e SEO.',
+            'nl' => 'Dit product is uit de verkoop gehaald. De pagina blijft beschikbaar voor informatieve en SEO-doeleinden.',
+        ];
+
+        return $messages[$isoCode] ?? 'This product has been withdrawn from sale. The page is kept online for reference and SEO purposes.';
     }
 }
