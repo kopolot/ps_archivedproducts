@@ -1,6 +1,6 @@
 # ps_archivedproducts
 
-PrestaShop 8 module for managing **archived / discontinued products** without breaking SEO.
+PrestaShop module for managing **archived / discontinued products** without breaking SEO. Compatible with **PrestaShop 1.7 and 8**.
 
 ## Problem
 
@@ -10,16 +10,16 @@ When you deactivate a product in PrestaShop, the product URL typically returns a
 
 This module:
 
-- Sets the product redirect type to **Displayed product page (HTTP 200)** when a product is deactivated
-- Keeps the product page accessible with full content for SEO
-- Blocks add to cart automatically (PrestaShop core behavior for inactive products)
+- Keeps the product page accessible (HTTP 200) when a product is deactivated
+- Hides archived products from catalog, search, and listings
+- Blocks add to cart on archived product pages
 - Shows a clear **archived product** banner on the product page
 - Optionally hides prices on archived products
 - Provides a one-click migration for existing inactive products
 
 ## Requirements
 
-- PrestaShop 8.0+
+- PrestaShop 1.7.1+ or 8.0+
 
 ## Installation
 
@@ -32,16 +32,26 @@ This module:
 
 | Setting | Description |
 |---------|-------------|
-| Auto-set redirect on deactivation | Automatically applies HTTP 200 redirect when a product is disabled |
+| Auto-archive on deactivation | Automatically archives products when they are disabled in back office |
 | Show archived banner | Displays a notice on archived product pages |
 | Hide prices on archived products | Hides price information on archived pages |
 | Archived product message | Custom multilingual message for the banner |
 
 ## How it works
 
-PrestaShop already supports `redirect_type = 200-displayed` for inactive products. This module automates that workflow and improves the customer experience with a visible archived notice.
+When you **deactivate** a product in back office, the module archives it using **soft archive** (no override, works on PS 1.7 and 8):
 
-When a product is reactivated, the redirect type is reset to default.
+| Field | Value | Effect |
+|-------|-------|--------|
+| `active` | **1** | Page stays accessible (HTTP 200) |
+| `visibility` | **none** | Hidden from catalog, search, listings |
+| `available_for_order` | **0** | Cannot be added to cart |
+
+The product is also marked in the module table `ps_archivedproducts`.
+
+To **restore** a product to sale, edit it and set visibility back to "Everywhere" or enable ordering — the module removes the archived flag automatically.
+
+Products with an explicit SEO redirect (301/302 to another product/category) are not auto-archived.
 
 ## License
 
