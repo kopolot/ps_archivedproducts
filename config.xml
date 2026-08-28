@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<module>
+    <name>ps_archivedproducts</name>
+    <displayName><![CDATA[Archived Products]]></displayName>
+    <version><![CDATA[1.0.0]]></version>
+    <description><![CDATA[Keep inactive product pages accessible for SEO while preventing orders.]]></description>
+    <author><![CDATA[kopolot]]></author>
+    <is_configurable>1</is_configurable>
+    <need_instance>0</need_instance>
+    <limited_countries></limited_countries>
+</module>
