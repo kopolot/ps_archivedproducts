@@ -10,14 +10,15 @@ if (!defined('_PS_VERSION_')) {
     exit;
 }
 
-use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\RedirectType;
-
 class Ps_Archivedproducts extends Module
 {
     /** @var bool Prevents recursive updates from product hooks */
-    private static $isUpdatingRedirect = false;
+    private static $isUpdatingProduct = false;
 
-    public const CONFIG_AUTO_REDIRECT = 'PS_ARCHIVEDPRODUCTS_AUTO_REDIRECT';
+    /** @var bool Prevents rendering the archived banner multiple times on one page */
+    private static $bannerRendered = false;
+
+    public const CONFIG_AUTO_ARCHIVE = 'PS_ARCHIVEDPRODUCTS_AUTO_REDIRECT';
     public const CONFIG_SHOW_BANNER = 'PS_ARCHIVEDPRODUCTS_SHOW_BANNER';
     public const CONFIG_HIDE_PRICE = 'PS_ARCHIVEDPRODUCTS_HIDE_PRICE';
     public const CONFIG_CUSTOM_MESSAGE = 'PS_ARCHIVEDPRODUCTS_CUSTOM_MESSAGE';
@@ -26,7 +27,7 @@ class Ps_Archivedproducts extends Module
     {
         $this->name = 'ps_archivedproducts';
         $this->tab = 'seo';
-        $this->version = '1.0.1';
+        $this->version = '1.1.6';
         $this->author = 'kopolot';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -35,10 +36,10 @@ class Ps_Archivedproducts extends Module
 
         $this->displayName = $this->l('Archived Products');
         $this->description = $this->l(
-            'Keeps inactive product pages online (HTTP 200) for SEO while blocking orders. Automatically sets the correct redirect type when products are deactivated.'
+            'Keeps archived product pages online for SEO while blocking orders. Products stay enabled but hidden from listings.'
         );
         $this->ps_versions_compliancy = [
-            'min' => '8.0.0',
+            'min' => '1.7.1.0',
             'max' => _PS_VERSION_,
         ];
     }
@@ -46,10 +47,17 @@ class Ps_Archivedproducts extends Module
     public function install()
     {
         return parent::install()
+            && $this->installDatabase()
             && $this->registerHook('actionProductUpdate')
             && $this->registerHook('actionProductSave')
+            && $this->registerHook('actionProductActivation')
+            && $this->registerHook('actionObjectProductUpdateAfter')
+            && $this->registerHook('actionFrontControllerInitBefore')
+            && $this->registerHook('actionPresentProduct')
             && $this->registerHook('displayHeader')
             && $this->registerHook('displayProductAdditionalInfo')
+            && $this->registerHook('displayProductPriceBlock')
+            && $this->registerHook('displayReassurance')
             && $this->registerHook('filterProductContent')
             && $this->installConfiguration();
     }
@@ -57,10 +65,27 @@ class Ps_Archivedproducts extends Module
     public function uninstall()
     {
         return $this->uninstallConfiguration()
+            && $this->uninstallDatabase()
             && parent::uninstall();
     }
 
-    private function installConfiguration(): bool
+    public function installDatabase()
+    {
+        return Db::getInstance()->execute(
+            'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'archivedproducts` (
+                `id_product` INT(10) UNSIGNED NOT NULL,
+                `date_add` DATETIME NOT NULL,
+                PRIMARY KEY (`id_product`)
+            ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8;'
+        );
+    }
+
+    private function uninstallDatabase()
+    {
+        return Db::getInstance()->execute('DROP TABLE IF EXISTS `' . _DB_PREFIX_ . 'archivedproducts`');
+    }
+
+    private function installConfiguration()
     {
         $languages = Language::getLanguages(false);
         $defaultMessages = [];
@@ -69,16 +94,15 @@ class Ps_Archivedproducts extends Module
             $defaultMessages[(int) $language['id_lang']] = $this->getDefaultMessageForIso($language['iso_code']);
         }
 
-        return Configuration::updateValue(self::CONFIG_AUTO_REDIRECT, 1)
+        return Configuration::updateValue(self::CONFIG_AUTO_ARCHIVE, 1)
             && Configuration::updateValue(self::CONFIG_SHOW_BANNER, 1)
             && Configuration::updateValue(self::CONFIG_HIDE_PRICE, 0)
-            && Configuration::updateValue(self::CONFIG_CUSTOM_MESSAGE, $defaultMessages, true)
-            && Configuration::updateValue('PS_PRODUCT_REDIRECTION_DEFAULT', RedirectType::TYPE_SUCCESS_DISPLAYED);
+            && Configuration::updateValue(self::CONFIG_CUSTOM_MESSAGE, $defaultMessages, true);
     }
 
-    private function uninstallConfiguration(): bool
+    private function uninstallConfiguration()
     {
-        return Configuration::deleteByName(self::CONFIG_AUTO_REDIRECT)
+        return Configuration::deleteByName(self::CONFIG_AUTO_ARCHIVE)
             && Configuration::deleteByName(self::CONFIG_SHOW_BANNER)
             && Configuration::deleteByName(self::CONFIG_HIDE_PRICE)
             && Configuration::deleteByName(self::CONFIG_CUSTOM_MESSAGE);
@@ -99,7 +123,7 @@ class Ps_Archivedproducts extends Module
         return $output . $this->renderConfigurationForm();
     }
 
-    private function processConfigurationForm(): string
+    private function processConfigurationForm()
     {
         $languages = Language::getLanguages(false);
         $messages = [];
@@ -112,7 +136,7 @@ class Ps_Archivedproducts extends Module
             );
         }
 
-        Configuration::updateValue(self::CONFIG_AUTO_REDIRECT, (int) Tools::getValue(self::CONFIG_AUTO_REDIRECT));
+        Configuration::updateValue(self::CONFIG_AUTO_ARCHIVE, (int) Tools::getValue(self::CONFIG_AUTO_ARCHIVE));
         Configuration::updateValue(self::CONFIG_SHOW_BANNER, (int) Tools::getValue(self::CONFIG_SHOW_BANNER));
         Configuration::updateValue(self::CONFIG_HIDE_PRICE, (int) Tools::getValue(self::CONFIG_HIDE_PRICE));
         Configuration::updateValue(self::CONFIG_CUSTOM_MESSAGE, $messages, true);
@@ -120,16 +144,16 @@ class Ps_Archivedproducts extends Module
         return $this->displayConfirmation($this->l('Settings updated.'));
     }
 
-    private function migrateExistingInactiveProducts(): string
+    private function migrateExistingInactiveProducts()
     {
         $updated = $this->applyArchivedRedirectToInactiveProducts();
 
         return $this->displayConfirmation(
-            sprintf($this->l('%d inactive products updated with archived redirect.'), $updated)
+            sprintf($this->l('%d products converted to archived mode.'), $updated)
         );
     }
 
-    private function renderConfigurationForm(): string
+    private function renderConfigurationForm()
     {
         $languages = Language::getLanguages(false);
         $defaultLang = (int) Configuration::get('PS_LANG_DEFAULT');
@@ -143,15 +167,15 @@ class Ps_Archivedproducts extends Module
                 'input' => [
                     [
                         'type' => 'switch',
-                        'label' => $this->l('Auto-set redirect on deactivation'),
-                        'name' => self::CONFIG_AUTO_REDIRECT,
+                        'label' => $this->l('Auto-archive on deactivation'),
+                        'name' => self::CONFIG_AUTO_ARCHIVE,
                         'desc' => $this->l(
-                            'When a product is deactivated, automatically set its redirect type to "Displayed product page (200)" so the URL stays accessible.'
+                            'When you deactivate a product, archive it instead: the page stays online (HTTP 200), the product is hidden from listings and cannot be ordered.'
                         ),
                         'is_bool' => true,
                         'values' => [
-                            ['id' => 'auto_redirect_on', 'value' => 1, 'label' => $this->l('Yes')],
-                            ['id' => 'auto_redirect_off', 'value' => 0, 'label' => $this->l('No')],
+                            ['id' => 'auto_archive_on', 'value' => 1, 'label' => $this->l('Yes')],
+                            ['id' => 'auto_archive_off', 'value' => 0, 'label' => $this->l('No')],
                         ],
                     ],
                     [
@@ -209,6 +233,10 @@ class Ps_Archivedproducts extends Module
             'id_language' => $defaultLang,
         ];
 
+        $info = '<div class="alert alert-info">' . $this->l(
+            'Archived products remain enabled (active) but use visibility "Nowhere", so they are hidden from the catalog while the direct URL still works.'
+        ) . '</div>';
+
         $migrateForm = '
             <div class="panel">
                 <div class="panel-heading">
@@ -216,7 +244,7 @@ class Ps_Archivedproducts extends Module
                 </div>
                 <div class="panel-body">
                     <p>' . $this->l(
-                        'Apply the archived redirect (HTTP 200, page displayed) to all currently inactive products that still use a 404 redirect.'
+                        'Convert inactive products (404 redirect) to archived mode.'
                     ) . '</p>
                     <form method="post" action="' . $helper->currentIndex . '&token=' . $helper->token . '">
                         <button type="submit" name="submitPsArchivedProductsMigrate" class="btn btn-primary">
@@ -226,13 +254,13 @@ class Ps_Archivedproducts extends Module
                 </div>
             </div>';
 
-        return $helper->generateForm([$fieldsForm]) . $migrateForm;
+        return $info . $helper->generateForm([$fieldsForm]) . $migrateForm;
     }
 
-    private function getConfigurationFormValues(array $languages): array
+    private function getConfigurationFormValues(array $languages)
     {
         $values = [
-            self::CONFIG_AUTO_REDIRECT => (int) Configuration::get(self::CONFIG_AUTO_REDIRECT),
+            self::CONFIG_AUTO_ARCHIVE => (int) Configuration::get(self::CONFIG_AUTO_ARCHIVE),
             self::CONFIG_SHOW_BANNER => (int) Configuration::get(self::CONFIG_SHOW_BANNER),
             self::CONFIG_HIDE_PRICE => (int) Configuration::get(self::CONFIG_HIDE_PRICE),
         ];
@@ -251,45 +279,132 @@ class Ps_Archivedproducts extends Module
         return $values;
     }
 
-    public function hookActionProductSave(array $params): void
+    public function hookActionProductSave($params)
     {
         $this->handleProductArchiveState($params);
     }
 
-    public function hookActionProductUpdate(array $params): void
+    public function hookActionProductUpdate($params)
     {
         $this->handleProductArchiveState($params);
     }
 
-    private function handleProductArchiveState(array $params): void
+    public function hookActionObjectProductUpdateAfter($params)
     {
-        if (self::$isUpdatingRedirect || !(int) Configuration::get(self::CONFIG_AUTO_REDIRECT)) {
+        if (empty($params['object']) || !($params['object'] instanceof Product)) {
             return;
         }
 
-        if (empty($params['product']) || !($params['product'] instanceof Product)) {
+        $this->handleProductArchiveState([
+            'product' => $params['object'],
+            'id_product' => (int) $params['object']->id,
+        ]);
+    }
+
+    public function hookActionProductActivation($params)
+    {
+        if (!empty($params['activated'])) {
             return;
         }
 
-        /** @var Product $product */
-        $product = $params['product'];
+        $this->handleProductArchiveState($params);
+    }
 
-        if (!(int) $product->id) {
+    private function handleProductArchiveState($params)
+    {
+        if (self::$isUpdatingProduct || !(int) Configuration::get(self::CONFIG_AUTO_ARCHIVE)) {
             return;
         }
 
-        if (!(int) $product->active) {
-            $this->applyArchivedRedirect($product);
+        $product = $this->resolveProductFromHookParams($params);
+        if (!$product) {
+            return;
+        }
+
+        $idProduct = (int) $product->id;
+
+        if ($idProduct <= 0) {
+            return;
+        }
+
+        $storedState = $this->getProductArchiveStateFromDb($idProduct);
+        if ($storedState === null) {
+            return;
+        }
+
+        if ($this->isProductMarkedArchived($idProduct)) {
+            if ($storedState['visibility'] !== 'none' && (int) $storedState['available_for_order'] === 1) {
+                $this->restoreFromArchive($idProduct);
+            }
 
             return;
         }
 
-        if ($this->isArchivedRedirectType((string) $product->redirect_type)) {
-            $this->updateProductRedirectType((int) $product->id, RedirectType::TYPE_DEFAULT);
+        if (!(int) $storedState['active']) {
+            $this->archiveProductById($idProduct);
         }
     }
 
-    public function hookDisplayHeader(): void
+    /**
+     * @param array<string, mixed> $params
+     *
+     * @return Product|null
+     */
+    private function resolveProductFromHookParams($params)
+    {
+        if (!empty($params['product']) && $params['product'] instanceof Product) {
+            return $params['product'];
+        }
+
+        if (!empty($params['id_product'])) {
+            $product = new Product((int) $params['id_product']);
+
+            return Validate::isLoadedObject($product) ? $product : null;
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array{active: int, visibility: string, available_for_order: int, redirect_type: string}|null
+     */
+    private function getProductArchiveStateFromDb($idProduct)
+    {
+        $idShop = (int) $this->context->shop->id;
+        $row = Db::getInstance()->getRow(
+            'SELECT ps.active, ps.visibility, ps.available_for_order, ps.redirect_type
+            FROM `' . _DB_PREFIX_ . 'product_shop` ps
+            WHERE ps.id_product = ' . (int) $idProduct . '
+            AND ps.id_shop = ' . $idShop
+        );
+
+        if (!is_array($row)) {
+            return null;
+        }
+
+        return [
+            'active' => (int) $row['active'],
+            'visibility' => (string) $row['visibility'],
+            'available_for_order' => (int) $row['available_for_order'],
+            'redirect_type' => (string) $row['redirect_type'],
+        ];
+    }
+
+    public function hookActionFrontControllerInitBefore($params)
+    {
+        if (Tools::getValue('preview') !== '1' || $this->isValidBackOfficeProductPreview()) {
+            return;
+        }
+
+        $idProduct = (int) Tools::getValue('id_product');
+        if ($idProduct <= 0 || !$this->isProductArchivedForDisplay($idProduct)) {
+            return;
+        }
+
+        Tools::redirect($this->context->link->getProductLink($idProduct));
+    }
+
+    public function hookDisplayHeader()
     {
         if (!$this->isProductControllerWithArchivedProduct()) {
             return;
@@ -302,37 +417,210 @@ class Ps_Archivedproducts extends Module
         );
     }
 
-    public function hookDisplayProductAdditionalInfo(array $params): string
+    public function hookDisplayProductAdditionalInfo($params)
     {
-        if (!(int) Configuration::get(self::CONFIG_SHOW_BANNER)) {
-            return '';
-        }
-
-        if (!$this->isArchivedProductFromParams($params)) {
-            return '';
-        }
-
-        $this->context->smarty->assign([
-            'archived_message' => $this->getArchivedMessage(),
-        ]);
-
-        return $this->fetch('module:ps_archivedproducts/views/templates/hook/archived-banner.tpl');
+        return $this->renderArchivedBanner($params);
     }
 
-    public function hookFilterProductContent(array $params): array
+    public function hookDisplayProductPriceBlock($params)
+    {
+        if (empty($params['type']) || $params['type'] !== 'after_price') {
+            return '';
+        }
+
+        return $this->renderArchivedBanner($params);
+    }
+
+    public function hookDisplayReassurance($params)
+    {
+        if (!(int) Configuration::get(self::CONFIG_HIDE_PRICE)) {
+            return '';
+        }
+
+        return $this->renderArchivedBanner($params);
+    }
+
+    public function hookActionPresentProduct($params)
+    {
+        if (empty($params['presentedProduct']) || !is_object($params['presentedProduct'])) {
+            return;
+        }
+
+        $presentedProduct = $params['presentedProduct'];
+        if (!method_exists($presentedProduct, 'jsonSerialize') || !method_exists($presentedProduct, 'appendArray')) {
+            return;
+        }
+
+        $product = $presentedProduct->jsonSerialize();
+        if (!is_array($product)) {
+            return;
+        }
+
+        $idProduct = $this->resolveProductId($product);
+        if ($idProduct > 0) {
+            $this->ensureInactiveProductIsArchived($idProduct);
+        }
+
+        if (!$this->isArchivedProductData($product)) {
+            return;
+        }
+
+        $presentedProduct->appendArray($this->applyArchivedProductPresentation($product));
+    }
+
+    public function hookFilterProductContent($params)
     {
         if (empty($params['object']) || !is_array($params['object'])) {
             return $params;
         }
 
-        $product = $params['object'];
+        $idProduct = $this->resolveProductId($params['object']);
+        if ($idProduct > 0) {
+            $this->ensureInactiveProductIsArchived($idProduct);
+        }
 
-        if (!$this->isArchivedProductData($product)) {
+        if (!$this->isArchivedProductData($params['object'])) {
             return $params;
         }
 
+        $params['object'] = $this->applyArchivedProductPresentation($params['object']);
+
+        return $params;
+    }
+
+    private function ensureInactiveProductIsArchived($idProduct)
+    {
+        if (self::$isUpdatingProduct || !(int) Configuration::get(self::CONFIG_AUTO_ARCHIVE)) {
+            return;
+        }
+
+        if ($this->isProductMarkedArchived($idProduct)) {
+            return;
+        }
+
+        $storedState = $this->getProductArchiveStateFromDb($idProduct);
+        if ($storedState === null || (int) $storedState['active']) {
+            return;
+        }
+
+        $this->archiveProductById($idProduct);
+    }
+
+    private function archiveProduct(Product $product)
+    {
+        $this->archiveProductById((int) $product->id);
+    }
+
+    private function archiveProductById($idProduct)
+    {
+        $this->applySoftArchive((int) $idProduct);
+    }
+
+    private function applySoftArchive($idProduct)
+    {
+        self::$isUpdatingProduct = true;
+
+        $data = [
+            'active' => 1,
+            'visibility' => 'none',
+            'available_for_order' => 0,
+            'id_type_redirected' => 0,
+        ];
+
+        if (version_compare(_PS_VERSION_, '8.0.0', '>=')) {
+            $data['redirect_type'] = 'default';
+        } else {
+            $data['redirect_type'] = '404';
+        }
+
+        Db::getInstance()->update('product', $data, 'id_product = ' . (int) $idProduct);
+        Db::getInstance()->update('product_shop', $data, 'id_product = ' . (int) $idProduct);
+
+        $this->markProductAsArchived((int) $idProduct);
+
+        self::$isUpdatingProduct = false;
+    }
+
+    private function restoreFromArchive($idProduct)
+    {
+        self::$isUpdatingProduct = true;
+
+        $data = [
+            'active' => 1,
+            'visibility' => 'both',
+            'available_for_order' => 1,
+        ];
+
+        Db::getInstance()->update('product', $data, 'id_product = ' . (int) $idProduct);
+        Db::getInstance()->update('product_shop', $data, 'id_product = ' . (int) $idProduct);
+
+        $this->unmarkProductAsArchived((int) $idProduct);
+
+        self::$isUpdatingProduct = false;
+    }
+
+    private function markProductAsArchived($idProduct)
+    {
+        if ($this->isProductMarkedArchived($idProduct)) {
+            return;
+        }
+
+        Db::getInstance()->insert('archivedproducts', [
+            'id_product' => (int) $idProduct,
+            'date_add' => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    private function unmarkProductAsArchived($idProduct)
+    {
+        Db::getInstance()->delete('archivedproducts', 'id_product = ' . (int) $idProduct);
+    }
+
+    private function isProductMarkedArchived($idProduct)
+    {
+        return (bool) Db::getInstance()->getValue(
+            'SELECT id_product FROM `' . _DB_PREFIX_ . 'archivedproducts` WHERE id_product = ' . (int) $idProduct
+        );
+    }
+
+    private function applyArchivedRedirectToInactiveProducts()
+    {
+        $shopId = (int) $this->context->shop->id;
+
+        $rows = Db::getInstance()->executeS(
+            'SELECT ps.id_product
+            FROM `' . _DB_PREFIX_ . 'product_shop` ps
+            LEFT JOIN `' . _DB_PREFIX_ . 'archivedproducts` ap ON ap.id_product = ps.id_product
+            WHERE ps.id_shop = ' . $shopId . '
+                AND ap.id_product IS NULL
+                AND (
+                    ps.active = 0
+                    OR (ps.active = 1 AND ps.visibility = "none" AND ps.available_for_order = 0)
+                )'
+        );
+
+        if (!is_array($rows)) {
+            return 0;
+        }
+
+        $updated = 0;
+        foreach ($rows as $row) {
+            $this->applySoftArchive((int) $row['id_product']);
+            ++$updated;
+        }
+
+        return $updated;
+    }
+
+    private function applyArchivedProductPresentation(array $product)
+    {
         $product['is_archived'] = true;
         $product['archived_message'] = $this->getArchivedMessage();
+        $product['add_to_cart_url'] = '';
+        $product['available_for_order'] = false;
+        $product['availability'] = 'discontinued';
+        $product['availability_message'] = $this->l('This product is no longer available for sale.');
+        $product['show_availability'] = true;
 
         if ((int) Configuration::get(self::CONFIG_HIDE_PRICE)) {
             $product['show_price'] = false;
@@ -349,96 +637,21 @@ class Ps_Archivedproducts extends Module
             $product['unit_price_full'] = '';
         }
 
-        $params['object'] = $product;
-
-        return $params;
+        return $product;
     }
 
-    private function applyArchivedRedirect(Product $product): void
+    private function isValidBackOfficeProductPreview()
     {
-        if ($this->isArchivedRedirectType((string) $product->redirect_type)) {
-            return;
+        if (Tools::getValue('preview') !== '1') {
+            return false;
         }
 
-        if ($this->isExplicitRedirectType((string) $product->redirect_type)) {
-            return;
-        }
-
-        $this->updateProductRedirectType((int) $product->id, RedirectType::TYPE_SUCCESS_DISPLAYED);
-    }
-
-    private function updateProductRedirectType(int $idProduct, string $redirectType): void
-    {
-        self::$isUpdatingRedirect = true;
-
-        Db::getInstance()->update(
-            'product',
-            ['redirect_type' => pSQL($redirectType)],
-            'id_product = ' . $idProduct
+        return Tools::getValue('adtoken') == Tools::getAdminToken(
+            'AdminProducts' . (int) Tab::getIdFromClassName('AdminProducts') . (int) Tools::getValue('id_employee')
         );
-
-        Db::getInstance()->update(
-            'product_shop',
-            ['redirect_type' => pSQL($redirectType)],
-            'id_product = ' . $idProduct
-        );
-
-        self::$isUpdatingRedirect = false;
     }
 
-    private function applyArchivedRedirectToInactiveProducts(): int
-    {
-        $shopId = (int) $this->context->shop->id;
-        $rows = Db::getInstance()->executeS(
-            'SELECT p.id_product
-            FROM `' . _DB_PREFIX_ . 'product` p
-            INNER JOIN `' . _DB_PREFIX_ . 'product_shop` ps
-                ON ps.id_product = p.id_product AND ps.id_shop = ' . $shopId . '
-            WHERE ps.active = 0
-                AND (
-                    ps.redirect_type = ""
-                    OR ps.redirect_type = "' . pSQL(RedirectType::TYPE_DEFAULT) . '"
-                    OR ps.redirect_type = "' . pSQL(RedirectType::TYPE_NOT_FOUND) . '"
-                    OR ps.redirect_type = "' . pSQL(RedirectType::TYPE_NOT_FOUND_DISPLAYED) . '"
-                )'
-        );
-
-        if (!is_array($rows)) {
-            return 0;
-        }
-
-        $updated = 0;
-
-        foreach ($rows as $row) {
-            $idProduct = (int) $row['id_product'];
-            $this->updateProductRedirectType($idProduct, RedirectType::TYPE_SUCCESS_DISPLAYED);
-            ++$updated;
-        }
-
-        return $updated;
-    }
-
-    private function isArchivedRedirectType(string $redirectType): bool
-    {
-        return in_array($redirectType, [
-            RedirectType::TYPE_SUCCESS_DISPLAYED,
-            RedirectType::TYPE_NOT_FOUND_DISPLAYED,
-            RedirectType::TYPE_GONE_DISPLAYED,
-        ], true);
-    }
-
-    private function isExplicitRedirectType(string $redirectType): bool
-    {
-        return in_array($redirectType, [
-            RedirectType::TYPE_PRODUCT_PERMANENT,
-            RedirectType::TYPE_PRODUCT_TEMPORARY,
-            RedirectType::TYPE_CATEGORY_PERMANENT,
-            RedirectType::TYPE_CATEGORY_TEMPORARY,
-            RedirectType::TYPE_GONE,
-        ], true);
-    }
-
-    private function isProductControllerWithArchivedProduct(): bool
+    private function isProductControllerWithArchivedProduct()
     {
         if (!($this->context->controller instanceof ProductController)) {
             return false;
@@ -446,10 +659,10 @@ class Ps_Archivedproducts extends Module
 
         $product = $this->context->controller->getProduct();
 
-        return $product instanceof Product && !(int) $product->active;
+        return $product instanceof Product && $this->isArchivedProductData($product);
     }
 
-    private function isArchivedProductFromParams(array $params): bool
+    private function isArchivedProductFromParams($params)
     {
         if (!empty($params['product'])) {
             return $this->isArchivedProductData($params['product']);
@@ -458,20 +671,87 @@ class Ps_Archivedproducts extends Module
         return $this->isProductControllerWithArchivedProduct();
     }
 
-    private function isArchivedProductData($product): bool
+    private function isArchivedProductData($product)
     {
-        if (is_array($product)) {
-            return isset($product['active']) && !(int) $product['active'];
-        }
+        $idProduct = $this->resolveProductId($product);
 
-        if (is_object($product) && isset($product->active)) {
-            return !(int) $product->active;
-        }
-
-        return false;
+        return $idProduct > 0 && $this->isProductArchivedForDisplay($idProduct);
     }
 
-    private function getArchivedMessage(): string
+    /**
+     * @param array<string, mixed>|object $product
+     */
+    private function resolveProductId($product)
+    {
+        if (is_array($product)) {
+            if (isset($product['id_product'])) {
+                return (int) $product['id_product'];
+            }
+
+            if (isset($product['id'])) {
+                return (int) $product['id'];
+            }
+
+            return 0;
+        }
+
+        if (!is_object($product)) {
+            return 0;
+        }
+
+        if (isset($product->id_product)) {
+            return (int) $product->id_product;
+        }
+
+        if (isset($product->id)) {
+            return (int) $product->id;
+        }
+
+        if (method_exists($product, 'jsonSerialize')) {
+            $data = $product->jsonSerialize();
+
+            if (is_array($data)) {
+                return $this->resolveProductId($data);
+            }
+        }
+
+        return 0;
+    }
+
+    private function isProductArchivedForDisplay($idProduct)
+    {
+        if ($this->isProductMarkedArchived($idProduct)) {
+            return true;
+        }
+
+        $storedState = $this->getProductArchiveStateFromDb($idProduct);
+
+        return $storedState !== null
+            && (int) $storedState['active'] === 1
+            && $storedState['visibility'] === 'none'
+            && (int) $storedState['available_for_order'] === 0;
+    }
+
+    private function renderArchivedBanner($params = [])
+    {
+        if (self::$bannerRendered || !(int) Configuration::get(self::CONFIG_SHOW_BANNER)) {
+            return '';
+        }
+
+        if (!$this->isArchivedProductFromParams($params)) {
+            return '';
+        }
+
+        self::$bannerRendered = true;
+
+        $this->context->smarty->assign([
+            'archived_message' => $this->getArchivedMessage(),
+        ]);
+
+        return $this->display(__FILE__, 'archived-banner.tpl');
+    }
+
+    private function getArchivedMessage()
     {
         $idLang = (int) $this->context->language->id;
         $message = Configuration::get(self::CONFIG_CUSTOM_MESSAGE, $idLang);
@@ -485,7 +765,7 @@ class Ps_Archivedproducts extends Module
         );
     }
 
-    private function getDefaultMessageForIso(string $isoCode): string
+    private function getDefaultMessageForIso($isoCode)
     {
         $isoCode = strtolower(substr($isoCode, 0, 2));
 
