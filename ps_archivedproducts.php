@@ -27,7 +27,7 @@ class Ps_Archivedproducts extends Module
     {
         $this->name = 'ps_archivedproducts';
         $this->tab = 'seo';
-        $this->version = '1.1.3';
+        $this->version = '1.1.4';
         $this->author = 'kopolot';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -50,6 +50,7 @@ class Ps_Archivedproducts extends Module
             && $this->installDatabase()
             && $this->registerHook('actionProductUpdate')
             && $this->registerHook('actionProductSave')
+            && $this->registerHook('actionObjectProductUpdateAfter')
             && $this->registerHook('actionPresentProduct')
             && $this->registerHook('displayHeader')
             && $this->registerHook('displayProductAdditionalInfo')
@@ -286,6 +287,18 @@ class Ps_Archivedproducts extends Module
         $this->handleProductArchiveState($params);
     }
 
+    public function hookActionObjectProductUpdateAfter($params)
+    {
+        if (empty($params['object']) || !($params['object'] instanceof Product)) {
+            return;
+        }
+
+        $this->handleProductArchiveState([
+            'product' => $params['object'],
+            'id_product' => (int) $params['object']->id,
+        ]);
+    }
+
     private function handleProductArchiveState($params)
     {
         if (self::$isUpdatingProduct || !(int) Configuration::get(self::CONFIG_AUTO_ARCHIVE)) {
@@ -317,7 +330,7 @@ class Ps_Archivedproducts extends Module
         }
 
         if (!(int) $storedState['active']) {
-            $this->archiveProductById($idProduct, (string) $storedState['redirect_type']);
+            $this->archiveProductById($idProduct);
         }
     }
 
@@ -438,15 +451,11 @@ class Ps_Archivedproducts extends Module
 
     private function archiveProduct(Product $product)
     {
-        $this->archiveProductById((int) $product->id, (string) $product->redirect_type);
+        $this->archiveProductById((int) $product->id);
     }
 
-    private function archiveProductById($idProduct, $redirectType)
+    private function archiveProductById($idProduct)
     {
-        if ($this->isExplicitRedirectType($redirectType)) {
-            return;
-        }
-
         $this->applySoftArchive((int) $idProduct);
     }
 
@@ -458,7 +467,14 @@ class Ps_Archivedproducts extends Module
             'active' => 1,
             'visibility' => 'none',
             'available_for_order' => 0,
+            'id_type_redirected' => 0,
         ];
+
+        if (version_compare(_PS_VERSION_, '8.0.0', '>=')) {
+            $data['redirect_type'] = 'default';
+        } else {
+            $data['redirect_type'] = '404';
+        }
 
         Db::getInstance()->update('product', $data, 'id_product = ' . (int) $idProduct);
         Db::getInstance()->update('product_shop', $data, 'id_product = ' . (int) $idProduct);
@@ -513,20 +529,6 @@ class Ps_Archivedproducts extends Module
     private function applyArchivedRedirectToInactiveProducts()
     {
         $shopId = (int) $this->context->shop->id;
-        $redirectFilter = '(
-            ps.redirect_type = ""
-            OR ps.redirect_type = "404"
-        )';
-
-        if (version_compare(_PS_VERSION_, '8.0.0', '>=')) {
-            $redirectFilter = '(
-                ps.redirect_type = ""
-                OR ps.redirect_type = "404"
-                OR ps.redirect_type = "default"
-                OR ps.redirect_type = "200-displayed"
-                OR ps.redirect_type = "404-displayed"
-            )';
-        }
 
         $rows = Db::getInstance()->executeS(
             'SELECT ps.id_product
@@ -537,8 +539,7 @@ class Ps_Archivedproducts extends Module
                 AND (
                     ps.active = 0
                     OR (ps.active = 1 AND ps.visibility = "none" AND ps.available_for_order = 0)
-                )
-                AND ' . $redirectFilter
+                )'
         );
 
         if (!is_array($rows)) {
@@ -582,20 +583,6 @@ class Ps_Archivedproducts extends Module
         return $product;
     }
 
-    private function isExplicitRedirectType($redirectType)
-    {
-        $types = [
-            '301-product',
-            '302-product',
-            '301-category',
-            '302-category',
-            '410',
-            '410-displayed',
-        ];
-
-        return in_array($redirectType, $types, true);
-    }
-
     private function isProductControllerWithArchivedProduct()
     {
         if (!($this->context->controller instanceof ProductController)) {
@@ -618,15 +605,49 @@ class Ps_Archivedproducts extends Module
 
     private function isArchivedProductData($product)
     {
-        $idProduct = 0;
-
-        if (is_array($product)) {
-            $idProduct = isset($product['id_product']) ? (int) $product['id_product'] : (isset($product['id']) ? (int) $product['id'] : 0);
-        } elseif (is_object($product) && isset($product->id)) {
-            $idProduct = (int) $product->id;
-        }
+        $idProduct = $this->resolveProductId($product);
 
         return $idProduct > 0 && $this->isProductArchivedForDisplay($idProduct);
+    }
+
+    /**
+     * @param array<string, mixed>|object $product
+     */
+    private function resolveProductId($product)
+    {
+        if (is_array($product)) {
+            if (isset($product['id_product'])) {
+                return (int) $product['id_product'];
+            }
+
+            if (isset($product['id'])) {
+                return (int) $product['id'];
+            }
+
+            return 0;
+        }
+
+        if (!is_object($product)) {
+            return 0;
+        }
+
+        if (isset($product->id_product)) {
+            return (int) $product->id_product;
+        }
+
+        if (isset($product->id)) {
+            return (int) $product->id;
+        }
+
+        if (method_exists($product, 'jsonSerialize')) {
+            $data = $product->jsonSerialize();
+
+            if (is_array($data)) {
+                return $this->resolveProductId($data);
+            }
+        }
+
+        return 0;
     }
 
     private function isProductArchivedForDisplay($idProduct)
@@ -659,7 +680,7 @@ class Ps_Archivedproducts extends Module
             'archived_message' => $this->getArchivedMessage(),
         ]);
 
-        return $this->fetch('module:ps_archivedproducts/views/templates/hook/archived-banner.tpl');
+        return $this->fetch('views/templates/hook/archived-banner.tpl');
     }
 
     private function getArchivedMessage()

@@ -51,7 +51,7 @@ The product is also marked in the module table `ps_archivedproducts`.
 
 To **restore** a product to sale, edit it and set visibility back to "Everywhere" **and** enable ordering — the module removes the archived flag automatically.
 
-Products with an explicit SEO redirect (301/302 to another product/category) are not auto-archived.
+Products with an explicit SEO redirect (301/302) are converted to archived mode on deactivation as well — the redirect is cleared so the product page stays online (HTTP 200).
 
 ## License
 
