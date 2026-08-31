@@ -27,7 +27,7 @@ class Ps_Archivedproducts extends Module
     {
         $this->name = 'ps_archivedproducts';
         $this->tab = 'seo';
-        $this->version = '1.1.5';
+        $this->version = '1.1.6';
         $this->author = 'kopolot';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -52,6 +52,7 @@ class Ps_Archivedproducts extends Module
             && $this->registerHook('actionProductSave')
             && $this->registerHook('actionProductActivation')
             && $this->registerHook('actionObjectProductUpdateAfter')
+            && $this->registerHook('actionFrontControllerInitBefore')
             && $this->registerHook('actionPresentProduct')
             && $this->registerHook('displayHeader')
             && $this->registerHook('displayProductAdditionalInfo')
@@ -389,6 +390,20 @@ class Ps_Archivedproducts extends Module
         ];
     }
 
+    public function hookActionFrontControllerInitBefore($params)
+    {
+        if (Tools::getValue('preview') !== '1' || $this->isValidBackOfficeProductPreview()) {
+            return;
+        }
+
+        $idProduct = (int) Tools::getValue('id_product');
+        if ($idProduct <= 0 || !$this->isProductArchivedForDisplay($idProduct)) {
+            return;
+        }
+
+        Tools::redirect($this->context->link->getProductLink($idProduct));
+    }
+
     public function hookDisplayHeader()
     {
         if (!$this->isProductControllerWithArchivedProduct()) {
@@ -623,6 +638,17 @@ class Ps_Archivedproducts extends Module
         }
 
         return $product;
+    }
+
+    private function isValidBackOfficeProductPreview()
+    {
+        if (Tools::getValue('preview') !== '1') {
+            return false;
+        }
+
+        return Tools::getValue('adtoken') == Tools::getAdminToken(
+            'AdminProducts' . (int) Tab::getIdFromClassName('AdminProducts') . (int) Tools::getValue('id_employee')
+        );
     }
 
     private function isProductControllerWithArchivedProduct()
