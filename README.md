@@ -49,7 +49,7 @@ When you **deactivate** a product in back office, the module archives it using *
 
 The product is also marked in the module table `ps_archivedproducts`.
 
-To **restore** a product to sale, edit it and set visibility back to "Everywhere" or enable ordering — the module removes the archived flag automatically.
+To **restore** a product to sale, edit it and set visibility back to "Everywhere" **and** enable ordering — the module removes the archived flag automatically.
 
 Products with an explicit SEO redirect (301/302 to another product/category) are not auto-archived.
 

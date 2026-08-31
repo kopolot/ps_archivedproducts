@@ -15,6 +15,9 @@ class Ps_Archivedproducts extends Module
     /** @var bool Prevents recursive updates from product hooks */
     private static $isUpdatingProduct = false;
 
+    /** @var bool Prevents rendering the archived banner multiple times on one page */
+    private static $bannerRendered = false;
+
     public const CONFIG_AUTO_ARCHIVE = 'PS_ARCHIVEDPRODUCTS_AUTO_REDIRECT';
     public const CONFIG_SHOW_BANNER = 'PS_ARCHIVEDPRODUCTS_SHOW_BANNER';
     public const CONFIG_HIDE_PRICE = 'PS_ARCHIVEDPRODUCTS_HIDE_PRICE';
@@ -24,7 +27,7 @@ class Ps_Archivedproducts extends Module
     {
         $this->name = 'ps_archivedproducts';
         $this->tab = 'seo';
-        $this->version = '1.1.2';
+        $this->version = '1.1.3';
         $this->author = 'kopolot';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -47,8 +50,11 @@ class Ps_Archivedproducts extends Module
             && $this->installDatabase()
             && $this->registerHook('actionProductUpdate')
             && $this->registerHook('actionProductSave')
+            && $this->registerHook('actionPresentProduct')
             && $this->registerHook('displayHeader')
             && $this->registerHook('displayProductAdditionalInfo')
+            && $this->registerHook('displayProductPriceBlock')
+            && $this->registerHook('displayReassurance')
             && $this->registerHook('filterProductContent')
             && $this->installConfiguration();
     }
@@ -303,7 +309,7 @@ class Ps_Archivedproducts extends Module
         }
 
         if ($this->isProductMarkedArchived($idProduct)) {
-            if ($storedState['visibility'] !== 'none' || (int) $storedState['available_for_order'] === 1) {
+            if ($storedState['visibility'] !== 'none' && (int) $storedState['available_for_order'] === 1) {
                 $this->restoreFromArchive($idProduct);
             }
 
@@ -375,19 +381,44 @@ class Ps_Archivedproducts extends Module
 
     public function hookDisplayProductAdditionalInfo($params)
     {
-        if (!(int) Configuration::get(self::CONFIG_SHOW_BANNER)) {
+        return $this->renderArchivedBanner($params);
+    }
+
+    public function hookDisplayProductPriceBlock($params)
+    {
+        if (empty($params['type']) || $params['type'] !== 'after_price') {
             return '';
         }
 
-        if (!$this->isArchivedProductFromParams($params)) {
+        return $this->renderArchivedBanner($params);
+    }
+
+    public function hookDisplayReassurance($params)
+    {
+        if (!(int) Configuration::get(self::CONFIG_HIDE_PRICE)) {
             return '';
         }
 
-        $this->context->smarty->assign([
-            'archived_message' => $this->getArchivedMessage(),
-        ]);
+        return $this->renderArchivedBanner($params);
+    }
 
-        return $this->fetch('module:ps_archivedproducts/views/templates/hook/archived-banner.tpl');
+    public function hookActionPresentProduct($params)
+    {
+        if (empty($params['presentedProduct']) || !is_object($params['presentedProduct'])) {
+            return;
+        }
+
+        $presentedProduct = $params['presentedProduct'];
+        if (!method_exists($presentedProduct, 'jsonSerialize') || !method_exists($presentedProduct, 'appendArray')) {
+            return;
+        }
+
+        $product = $presentedProduct->jsonSerialize();
+        if (!is_array($product) || !$this->isArchivedProductData($product)) {
+            return;
+        }
+
+        $presentedProduct->appendArray($this->applyArchivedProductPresentation($product));
     }
 
     public function hookFilterProductContent($params)
@@ -484,16 +515,16 @@ class Ps_Archivedproducts extends Module
         $shopId = (int) $this->context->shop->id;
         $redirectFilter = '(
             ps.redirect_type = ""
-            OR ps.redirect_type = "' . pSQL(RedirectType::TYPE_NOT_FOUND) . '"
+            OR ps.redirect_type = "404"
         )';
 
         if (version_compare(_PS_VERSION_, '8.0.0', '>=')) {
             $redirectFilter = '(
                 ps.redirect_type = ""
-                OR ps.redirect_type = "' . pSQL(RedirectType::TYPE_NOT_FOUND) . '"
-                OR ps.redirect_type = "' . pSQL(RedirectType::TYPE_DEFAULT) . '"
+                OR ps.redirect_type = "404"
+                OR ps.redirect_type = "default"
                 OR ps.redirect_type = "200-displayed"
-                OR ps.redirect_type = "' . pSQL(RedirectType::TYPE_NOT_FOUND_DISPLAYED) . '"
+                OR ps.redirect_type = "404-displayed"
             )';
         }
 
@@ -595,7 +626,40 @@ class Ps_Archivedproducts extends Module
             $idProduct = (int) $product->id;
         }
 
-        return $idProduct > 0 && $this->isProductMarkedArchived($idProduct);
+        return $idProduct > 0 && $this->isProductArchivedForDisplay($idProduct);
+    }
+
+    private function isProductArchivedForDisplay($idProduct)
+    {
+        if ($this->isProductMarkedArchived($idProduct)) {
+            return true;
+        }
+
+        $storedState = $this->getProductArchiveStateFromDb($idProduct);
+
+        return $storedState !== null
+            && (int) $storedState['active'] === 1
+            && $storedState['visibility'] === 'none'
+            && (int) $storedState['available_for_order'] === 0;
+    }
+
+    private function renderArchivedBanner($params = [])
+    {
+        if (self::$bannerRendered || !(int) Configuration::get(self::CONFIG_SHOW_BANNER)) {
+            return '';
+        }
+
+        if (!$this->isArchivedProductFromParams($params)) {
+            return '';
+        }
+
+        self::$bannerRendered = true;
+
+        $this->context->smarty->assign([
+            'archived_message' => $this->getArchivedMessage(),
+        ]);
+
+        return $this->fetch('module:ps_archivedproducts/views/templates/hook/archived-banner.tpl');
     }
 
     private function getArchivedMessage()
