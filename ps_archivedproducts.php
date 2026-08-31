@@ -27,7 +27,7 @@ class Ps_Archivedproducts extends Module
     {
         $this->name = 'ps_archivedproducts';
         $this->tab = 'seo';
-        $this->version = '1.1.4';
+        $this->version = '1.1.5';
         $this->author = 'kopolot';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -50,6 +50,7 @@ class Ps_Archivedproducts extends Module
             && $this->installDatabase()
             && $this->registerHook('actionProductUpdate')
             && $this->registerHook('actionProductSave')
+            && $this->registerHook('actionProductActivation')
             && $this->registerHook('actionObjectProductUpdateAfter')
             && $this->registerHook('actionPresentProduct')
             && $this->registerHook('displayHeader')
@@ -299,6 +300,15 @@ class Ps_Archivedproducts extends Module
         ]);
     }
 
+    public function hookActionProductActivation($params)
+    {
+        if (!empty($params['activated'])) {
+            return;
+        }
+
+        $this->handleProductArchiveState($params);
+    }
+
     private function handleProductArchiveState($params)
     {
         if (self::$isUpdatingProduct || !(int) Configuration::get(self::CONFIG_AUTO_ARCHIVE)) {
@@ -427,7 +437,16 @@ class Ps_Archivedproducts extends Module
         }
 
         $product = $presentedProduct->jsonSerialize();
-        if (!is_array($product) || !$this->isArchivedProductData($product)) {
+        if (!is_array($product)) {
+            return;
+        }
+
+        $idProduct = $this->resolveProductId($product);
+        if ($idProduct > 0) {
+            $this->ensureInactiveProductIsArchived($idProduct);
+        }
+
+        if (!$this->isArchivedProductData($product)) {
             return;
         }
 
@@ -440,6 +459,11 @@ class Ps_Archivedproducts extends Module
             return $params;
         }
 
+        $idProduct = $this->resolveProductId($params['object']);
+        if ($idProduct > 0) {
+            $this->ensureInactiveProductIsArchived($idProduct);
+        }
+
         if (!$this->isArchivedProductData($params['object'])) {
             return $params;
         }
@@ -447,6 +471,24 @@ class Ps_Archivedproducts extends Module
         $params['object'] = $this->applyArchivedProductPresentation($params['object']);
 
         return $params;
+    }
+
+    private function ensureInactiveProductIsArchived($idProduct)
+    {
+        if (self::$isUpdatingProduct || !(int) Configuration::get(self::CONFIG_AUTO_ARCHIVE)) {
+            return;
+        }
+
+        if ($this->isProductMarkedArchived($idProduct)) {
+            return;
+        }
+
+        $storedState = $this->getProductArchiveStateFromDb($idProduct);
+        if ($storedState === null || (int) $storedState['active']) {
+            return;
+        }
+
+        $this->archiveProductById($idProduct);
     }
 
     private function archiveProduct(Product $product)
