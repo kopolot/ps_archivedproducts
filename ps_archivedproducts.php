@@ -680,7 +680,7 @@ class Ps_Archivedproducts extends Module
             'archived_message' => $this->getArchivedMessage(),
         ]);
 
-        return $this->fetch('views/templates/hook/archived-banner.tpl');
+        return $this->display(__FILE__, 'archived-banner.tpl');
     }
 
     private function getArchivedMessage()
